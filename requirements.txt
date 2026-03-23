@@ -1,0 +1,31 @@
+# ============================================================================
+# MNIST Academic Baseline — Dependências do Projeto
+# ============================================================================
+# Framework de Deep Learning (Paszke et al., 2019 — "PyTorch: An Imperative
+# Style, High-Performance Deep Learning Library", NeurIPS)
+torch>=2.0.0
+torchvision>=0.15.0
+
+# Computação numérica e manipulação de dados
+numpy>=1.24.0
+pandas>=2.0.0
+
+# Visualização científica (Hunter, 2007 — Matplotlib)
+matplotlib>=3.7.0
+seaborn>=0.12.0
+
+# Otimização de hiperparâmetros (Akiba et al., 2019 — "Optuna: A
+# Next-generation Hyperparameter Optimization Framework", KDD)
+optuna>=3.3.0
+
+# Configuração de experimentos via YAML
+pyyaml>=6.0
+
+# Métricas de classificação (Pedregosa et al., 2011 — scikit-learn)
+scikit-learn>=1.3.0
+
+# Logging estruturado de experimentos
+tensorboard>=2.14.0
+
+# Barras de progresso para loops de treinamento
+tqdm>=4.65.0
