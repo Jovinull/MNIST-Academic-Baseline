@@ -1,0 +1,148 @@
+# ============================================================================
+# MNIST Academic Baseline — Configuração de Hiperparâmetros
+# ============================================================================
+# Este arquivo YAML centraliza todos os hiperparâmetros do pipeline de
+# experimentação. A separação entre código e configuração segue o princípio
+# de "Configuration as Code" (Humble & Farley, 2010), permitindo
+# reprodutibilidade e rastreabilidade dos experimentos.
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# 1. SEMENTE ALEATÓRIA (Reprodutibilidade)
+# ----------------------------------------------------------------------------
+# Fixar a semente garante determinismo nos resultados experimentais.
+# Referência: Bouthillier et al. (2021) — "Accounting for Variance in
+# Machine Learning Benchmarks", MLSys.
+seed: 42
+
+# ----------------------------------------------------------------------------
+# 2. CONFIGURAÇÃO DE DADOS
+# ----------------------------------------------------------------------------
+data:
+  # Caminho relativo ao diretório raiz do projeto onde estão os arquivos
+  # binários IDX do MNIST (formato descrito em LeCun et al., 1998).
+  raw_dir: "data/raw"
+
+  # Fração do conjunto de treino reservada para validação.
+  # Tipicamente 10-20% (Goodfellow et al., 2016, cap. 5 — "Machine Learning
+  # Basics", seção sobre validação cruzada hold-out).
+  validation_split: 0.1
+
+  # Número de workers para o DataLoader do PyTorch.
+  # Paraleliza o carregamento de dados em CPU enquanto a GPU treina.
+  num_workers: 2
+
+  # Pin memory acelera a transferência CPU→GPU ao alocar memória paginada
+  # (page-locked). Recomendado quando se usa GPU (PyTorch Docs).
+  pin_memory: true
+
+# ----------------------------------------------------------------------------
+# 3. ESPAÇO DE BUSCA DE HIPERPARÂMETROS
+# ----------------------------------------------------------------------------
+# Define os intervalos e opções que o módulo de tuning irá explorar.
+# A escolha dos intervalos segue heurísticas consolidadas da literatura:
+#   - Smith (2018) — "A Disciplined Approach to Neural Network Hyper-Parameters"
+#   - Bengio (2012) — "Practical Recommendations for Gradient-Based Training"
+# ----------------------------------------------------------------------------
+search_space:
+
+  # --- Arquiteturas disponíveis ---
+  # Cada arquitetura representa um marco na evolução das CNNs para
+  # reconhecimento de dígitos manuscritos.
+  architecture:
+    - "MLP"            # Multilayer Perceptron — baseline linear (Rosenblatt, 1958)
+    - "LeNet5"         # CNN clássica (LeCun et al., 1998)
+    - "ModernCNN"      # CNN com BatchNorm + Dropout (Ioffe & Szegedy, 2015)
+    - "DeepCNN"        # CNN profunda com blocos residuais (He et al., 2016)
+
+  # --- Taxa de aprendizado (learning rate) ---
+  # Escala log-uniforme, pois o impacto é multiplicativo.
+  # Intervalo [1e-4, 1e-1] cobre desde ajuste fino até convergência rápida.
+  learning_rate:
+    type: "log_uniform"
+    low: 1.0e-4
+    high: 1.0e-1
+
+  # --- Tamanho do batch ---
+  # Potências de 2 otimizam o uso de memória em GPUs (Keskar et al., 2017).
+  batch_size:
+    - 32
+    - 64
+    - 128
+    - 256
+
+  # --- Otimizadores ---
+  # SGD: baseline clássico com momentum (Polyak, 1964; Sutskever et al., 2013).
+  # Adam: adaptativo, combina momentum + RMSProp (Kingma & Ba, 2015).
+  # AdamW: corrige o weight decay desacoplado (Loshchilov & Hutter, 2019).
+  optimizer:
+    - "SGD"
+    - "Adam"
+    - "AdamW"
+
+  # --- Épocas de treinamento ---
+  epochs:
+    - 10
+    - 20
+    - 30
+
+  # --- Dropout ---
+  # Regularização estocástica (Srivastava et al., 2014).
+  # Valores entre 0.0 (sem dropout) e 0.5 (agressivo).
+  dropout_rate:
+    type: "uniform"
+    low: 0.0
+    high: 0.5
+
+  # --- Weight Decay (L2 Regularization) ---
+  # Penaliza pesos grandes para evitar overfitting (Krogh & Hertz, 1991).
+  weight_decay:
+    type: "log_uniform"
+    low: 1.0e-6
+    high: 1.0e-2
+
+  # --- Learning Rate Scheduler ---
+  # StepLR: decai por fator fixo a cada N épocas.
+  # CosineAnnealing: decaimento suave seguindo cosseno (Loshchilov & Hutter, 2017).
+  # ReduceOnPlateau: reduz quando a métrica estagna.
+  scheduler:
+    - "StepLR"
+    - "CosineAnnealingLR"
+    - "ReduceLROnPlateau"
+    - "None"
+
+# ----------------------------------------------------------------------------
+# 4. CONFIGURAÇÃO PADRÃO DE TREINAMENTO
+# ----------------------------------------------------------------------------
+# Usada quando se executa um treino único (sem tuning).
+# Valores escolhidos como "defaults razoáveis" baseados na literatura.
+# ----------------------------------------------------------------------------
+defaults:
+  architecture: "LeNet5"
+  learning_rate: 1.0e-3
+  batch_size: 64
+  optimizer: "Adam"
+  epochs: 20
+  dropout_rate: 0.25
+  weight_decay: 1.0e-4
+  scheduler: "CosineAnnealingLR"
+
+# ----------------------------------------------------------------------------
+# 5. CONFIGURAÇÃO DO TUNING
+# ----------------------------------------------------------------------------
+tuning:
+  # Número de trials (combinações de hiperparâmetros) a explorar.
+  # Optuna usa amostragem bayesiana (TPE — Tree-structured Parzen Estimator)
+  # para concentrar buscas nas regiões mais promissoras do espaço.
+  n_trials: 50
+
+  # Métrica a otimizar e direção.
+  metric: "val_accuracy"
+  direction: "maximize"
+
+  # Poda (pruning) de trials pouco promissores usando MedianPruner
+  # (Akiba et al., 2019). Economiza recursos computacionais.
+  pruning: true
+
+  # Número de épocas de warmup antes de começar a podar.
+  pruning_warmup_epochs: 5
