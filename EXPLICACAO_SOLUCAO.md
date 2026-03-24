@@ -2,6 +2,21 @@
 
 ---
 
+## Resumo Rápido para Apresentação (Elevator Pitch)
+
+1. **Leitura Binária de Baixo Nível (Parsing manual):** Em vez de usar bibliotecas prontas como o `torchvision`, implementei a leitura direta dos arquivos originais `.idx` usando a biblioteca `struct`. Li byte a byte, converti para arrays NumPy (`np.frombuffer`) e montei os DataLoaders do PyTorch. Isso prova o entendimento real do formato de dados.
+2. **Pré-Processamento Rigoroso:** Separei os dados estritamente em Treino, Validação e Teste. Apliquei normalização (Z-Score) usando a média e desvio padrão *exclusivos* do treino (evitando data leakage) e integrei Data Augmentation no próprio pipeline para prevenir overfitting.
+3. **Progressão de 4 Arquiteturas (Feitas do zero):** Ao invés de usar uma rede genérica, criei uma esteira de evolução histórica na visão computacional:
+   - **MLP**: Baseline simples e raso para comparação inicial.
+   - **LeNet-5**: Introdução das primeiras convoluções locais reais.
+   - **ModernCNN**: Evolução usando Batch Normalization e Spatial Dropout (Dropout2d).
+   - **DeepCNN**: Refinamento de ponta utilizando blocos residuais (skip connections) para não perder gradiente e Global Average Pooling para classificação dinâmica.
+4. **Treinamento e Engenharia:** Construí o loop de treinamento profissional abstraindo early stopping monitorando corretamente a `validation_loss` e não a de teste. Integrei otimizadores como AdamW em conjunto com agendadores modernos de learning rate (como Cosine Annealing LR).
+5. **Tuning de Hiperparâmetros (Optuna):** Não houve tentativa e erro manual; embuti uma camada de tuning com busca bayesiana (TPE) do Optuna. Mais do que isso, desenvolvi um sistema de persistência onde o pipeline sabe decidir entre múltiplas execuções se o modelo atual é estritamente melhor, armazenando o vencedor e seus parâmetros em um `best_params.yaml`.
+6. **Rigor e Reprodutibilidade Absoluta:** Congelei as sementes (random seeds) estocásticas em todos os ecossistemas: built-in do Python, NumPy, PyTorch de CPU genérico e determinismo da engine do CUDA da GPU. 
+
+---
+
 ## PARTE 1 — Nivelamento: Entendendo os Conceitos Base
 
 Antes de qualquer detalhe tecnico, e preciso entender o que cada palavra significa. Esta secao explica os termos do zero.
