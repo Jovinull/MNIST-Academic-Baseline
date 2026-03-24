@@ -48,6 +48,7 @@ from src.architectures import build_model, count_parameters
 from src.training import Trainer, build_optimizer, build_scheduler
 from src.evaluation import full_evaluation
 from src.tuning import run_tuning
+from src.persistence import load_best_params, compare_and_maybe_save
 
 
 # ============================================================================
@@ -275,6 +276,15 @@ Exemplos de uso:
              '(default: tpe)',
     )
 
+    # --- Controle de persistência ---
+    parser.add_argument(
+        '--no_saved_params',
+        action='store_true',
+        default=False,
+        help='Ignora o arquivo best_params.yaml e usa apenas os defaults '
+             'do YAML. Útil para comparar o desempenho com e sem tuning.',
+    )
+
     return parser.parse_args()
 
 
@@ -340,12 +350,44 @@ def run_single_training(args: argparse.Namespace, config: dict, device: torch.de
     logger = logging.getLogger(__name__)
 
     # -----------------------------------------------------------------
-    # RESOLUÇÃO DE HIPERPARÂMETROS
+    # RESOLUÇÃO DE HIPERPARÂMETROS (3 níveis de prioridade)
     # -----------------------------------------------------------------
-    # Padrão: usa os valores do YAML. Se o usuário passou argumentos
-    # pela CLI, eles sobrescrevem os defaults.
-    defaults = config['defaults']
+    # Nível 1 (menor): config/hyperparameters.yaml → seção "defaults"
+    # Nível 2:         results/best_params.yaml (gerado pelo tuning)
+    # Nível 3 (maior): argumentos de linha de comando (--architecture, etc.)
+    #
+    # Se best_params.yaml existir e --no_saved_params não for usado,
+    # seus valores sobrescrevem os defaults do YAML antes da resolução
+    # com os argumentos CLI. Isso permite que um tuning anterior seja
+    # reutilizado automaticamente por execuções futuras de --mode train.
+    # -----------------------------------------------------------------
+    defaults = config['defaults'].copy()
 
+    # Tenta carregar hiperparâmetros otimizados de um tuning anterior.
+    if not getattr(args, 'no_saved_params', False):
+        saved_best = load_best_params(args.output_dir)
+        if saved_best is not None:
+            logger.info(
+                f"Hiperparametros otimizados detectados em "
+                f"{os.path.join(args.output_dir, 'best_params.yaml')} "
+                f"(val_acc: {saved_best['metrics']['val_accuracy']:.4f}, "
+                f"tuning de: {saved_best['metadata']['timestamp']}). "
+                f"Usando como base para o treinamento."
+            )
+            # Os valores do best_params sobrescrevem os defaults do YAML.
+            defaults.update(saved_best['hyperparameters'])
+        else:
+            logger.info(
+                "Nenhum best_params.yaml encontrado. "
+                "Usando defaults do YAML."
+            )
+    else:
+        logger.info(
+            "Flag --no_saved_params ativa. "
+            "Ignorando best_params.yaml e usando defaults do YAML."
+        )
+
+    # Resolução final: argumentos CLI têm prioridade máxima.
     architecture  = args.architecture or defaults['architecture']
     epochs        = args.epochs or defaults['epochs']
     learning_rate = args.learning_rate or defaults['learning_rate']
@@ -506,7 +548,24 @@ def main():
             sampler_type=args.sampler,
         )
 
-        # Após o tuning, treina o melhor modelo com avaliação completa.
+        # -----------------------------------------------------------------
+        # PERSISTENCIA: compara com o melhor resultado anterior e salva
+        # se o novo tuning for superior. Registra no historico sempre.
+        # -----------------------------------------------------------------
+        was_saved = compare_and_maybe_save(
+            output_dir=args.output_dir,
+            best_trial=study.best_trial,
+            sampler_type=args.sampler,
+            n_trials=len(study.trials),
+            study=study,
+        )
+
+        # -----------------------------------------------------------------
+        # TREINAMENTO FINAL com os melhores parametros deste tuning.
+        # Independente de ter sido salvo como melhor global ou nao,
+        # o treinamento final sempre usa o melhor trial DESTE study,
+        # para que o usuario obtenha o modelo completo e avaliado.
+        # -----------------------------------------------------------------
         logger.info("\nTreinando o melhor modelo encontrado pelo tuning...")
 
         best_params = study.best_trial.params
@@ -528,6 +587,10 @@ def main():
             'weight_decay':  best_params.get('weight_decay', 1e-4),
             'scheduler':     best_params.get('scheduler', 'CosineAnnealingLR'),
         })
+
+        # Desativa auto-deteccao do best_params.yaml para evitar conflito
+        # com os parametros injetados acima (que vem deste study).
+        args.no_saved_params = True
 
         run_single_training(args, config, device)
 

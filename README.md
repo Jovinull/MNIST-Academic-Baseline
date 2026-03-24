@@ -187,6 +187,7 @@ python main.py --mode tune --n_trials 50 --sampler tpe --device cuda
 | `--optimizer` | str | YAML | `SGD`, `Adam`, `AdamW` |
 | `--n_trials` | int | YAML | Número de trials (modo tune) |
 | `--sampler` | str | `tpe` | `tpe`, `random`, `grid` |
+| `--no_saved_params` | flag | — | Ignora `best_params.yaml` e usa apenas defaults do YAML |
 
 ---
 
@@ -266,32 +267,71 @@ A experimentação segue uma abordagem em duas fases:
 
 ## Otimizacao de Hiperparametros — Mecanismo Interno e Estrategias
 
-Esta secao explica em detalhe como o pipeline resolve os hiperparametros em cada modo de execucao, qual a relacao entre o tuning e o treinamento, como os artefatos sao nomeados e salvos, e o que acontece quando multiplos tunings sao executados.
+Esta secao explica em detalhe como o pipeline resolve os hiperparametros em cada modo de execucao, como os resultados de tuning sao persistidos e comparados entre execucoes, qual a relacao entre o treinamento do tuning e o treinamento normal, e como os artefatos sao nomeados.
 
 ---
 
-### Origem dos Hiperparametros no Modo `--mode train`
+### Persistencia Automatica dos Melhores Hiperparametros
 
-O comando `--mode train` utiliza **exclusivamente parametros fixos**. Nao consulta nenhum resultado de tuning anterior, nao le nenhum arquivo de relatorio, e nao possui nenhum mecanismo de persistencia entre execucoes. Os valores sao resolvidos pela funcao `run_single_training` em `main.py` (linhas 347-357) seguindo esta logica:
+O pipeline possui um sistema de persistencia implementado no modulo `src/persistence.py` que conecta o tuning ao treinamento entre execucoes independentes. O mecanismo funciona da seguinte forma:
+
+1. Ao final de um `--mode tune`, o melhor resultado e salvo em `results/best_params.yaml` contendo os 8 hiperparametros, metricas de desempenho (acuracia, numero de parametros, tempo de treinamento) e metadados (sampler, numero de trials, timestamp).
+
+2. Ao executar `--mode train`, o pipeline verifica automaticamente se `results/best_params.yaml` existe. Se existir, carrega os hiperparametros desse arquivo e os utiliza no lugar dos defaults do YAML. Nenhuma intervencao manual e necessaria.
+
+3. Ao executar um novo `--mode tune`, o resultado e comparado automaticamente contra o `best_params.yaml` existente. O novo resultado so sobrescreve o anterior se for estritamente superior. Caso contrario, o anterior e mantido.
+
+4. Todas as execucoes de tuning sao registradas em `results/tuning_history.yaml`, independente de serem melhores ou nao.
+
+---
+
+### Resolucao de Hiperparametros: Hierarquia de 3 Niveis
+
+A funcao `run_single_training` em `main.py` resolve os hiperparametros seguindo esta ordem de prioridade:
+
+```
+Nivel 1 (menor prioridade):  config/hyperparameters.yaml  ->  secao "defaults"
+Nivel 2:                     results/best_params.yaml      ->  gerado pelo tuning
+Nivel 3 (maior prioridade):  argumentos de linha de comando (--architecture, etc.)
+```
+
+O codigo que implementa esta resolucao:
 
 ```python
-defaults = config['defaults']                                  # Le a secao "defaults" do YAML
-architecture  = args.architecture or defaults['architecture']  # CLI tem prioridade sobre YAML
+# main.py, funcao run_single_training
+
+# 1. Carrega defaults do YAML
+defaults = config['defaults'].copy()
+
+# 2. Se best_params.yaml existir, sobrescreve os defaults
+saved_best = load_best_params(args.output_dir)
+if saved_best is not None:
+    defaults.update(saved_best['hyperparameters'])
+
+# 3. Argumentos CLI tem prioridade maxima
+architecture  = args.architecture or defaults['architecture']
 epochs        = args.epochs       or defaults['epochs']
 learning_rate = args.learning_rate or defaults['learning_rate']
 batch_size    = args.batch_size   or defaults['batch_size']
 optimizer_name = args.optimizer   or defaults['optimizer']
-dropout_rate  = defaults['dropout_rate']                       # Somente via YAML (sem flag CLI)
-weight_decay  = defaults['weight_decay']                       # Somente via YAML (sem flag CLI)
-scheduler_name = defaults['scheduler']                         # Somente via YAML (sem flag CLI)
+dropout_rate  = defaults['dropout_rate']
+weight_decay  = defaults['weight_decay']
+scheduler_name = defaults['scheduler']
 ```
 
-A prioridade e:
+O operador `or` do Python retorna o primeiro valor truthy. Se um argumento CLI foi fornecido, ele prevalece. Se nao, o valor de `defaults` (que pode ter sido atualizado pelo `best_params.yaml`) e usado.
 
-1. Se um argumento foi passado via linha de comando (e.g., `--architecture DeepCNN`), esse valor e usado.
-2. Se nao foi passado, o valor da secao `defaults` do arquivo `config/hyperparameters.yaml` e usado.
+---
 
-Os defaults do YAML sao:
+### Cenarios de Uso Detalhados
+
+**Cenario 1: Treinamento sem tuning previo**
+
+```bash
+python main.py --mode train
+```
+
+Nenhum `best_params.yaml` existe. O pipeline usa exclusivamente a secao `defaults` do YAML:
 
 ```yaml
 defaults:
@@ -305,51 +345,143 @@ defaults:
   scheduler: "CosineAnnealingLR"
 ```
 
-Esses valores foram escolhidos com base na literatura (Bengio, 2012; Smith, 2018) e representam uma configuracao conservadora que produz resultados solidos sem otimizacao.
+**Cenario 2: Tuning seguido de treinamento**
 
-**Consequencia direta**: executar `python main.py --mode train` apos um tuning anterior NAO utiliza os resultados daquele tuning. O modo train e completamente independente. Para que ele use parametros diferentes, e necessario passa-los explicitamente via CLI ou editar a secao `defaults` no YAML.
+```bash
+python main.py --mode tune --n_trials 50 --sampler tpe    # (1) Tuning
+python main.py --mode train                                # (2) Treinamento
+```
+
+Execucao (1): o tuning testa 50 combinacoes, encontra a melhor (e.g., DeepCNN com lr=2.8e-3), salva os resultados em `results/best_params.yaml`, e treina automaticamente o modelo final com esses parametros.
+
+Execucao (2): o pipeline detecta `results/best_params.yaml`, carrega os hiperparametros otimizados (DeepCNN, lr=2.8e-3, etc.), e treina com eles. O log exibe:
+
+```
+Hiperparametros otimizados detectados em results/best_params.yaml
+(val_acc: 0.9945, tuning de: 2026-03-23 14:30:00). Usando como base para o treinamento.
+```
+
+Nenhuma copia manual de parametros e necessaria. Todos os 8 hiperparametros (incluindo `dropout_rate`, `weight_decay` e `scheduler`, que nao possuem flags CLI) sao carregados automaticamente.
+
+**Cenario 3: Segundo tuning — comparacao automatica**
+
+```bash
+python main.py --mode tune --n_trials 50 --sampler tpe      # (1) Primeiro tuning
+python main.py --mode tune --n_trials 50 --sampler random    # (2) Segundo tuning
+```
+
+Execucao (1): salva o melhor resultado em `best_params.yaml` (e.g., val_acc=0.9932).
+
+Execucao (2): ao terminar, o pipeline carrega o `best_params.yaml` do tuning anterior e compara com o novo resultado. O log exibe uma tabela de comparacao:
+
+```
+======================================================================
+COMPARACAO: Novo Tuning vs. Melhor Salvo Anteriormente
+======================================================================
+
+  Metrica                      Salvo           Novo       Melhor
+  ──────────────────────── ────────────── ────────────── ──────────
+  Val Accuracy                   0.9932         0.9945       NOVO
+  Num Parameters                128,456         95,200       NOVO
+  Training Time (s)              142.5          138.2        NOVO
+  ──────────────────────── ────────────── ────────────── ──────────
+  Architecture                ModernCNN        DeepCNN        ---
+  Sampler                          tpe         random         ---
+  Trials                            50             50         ---
+  Timestamp              2026-03-23 14:30 2026-03-23 16:00    ---
+
+======================================================================
+  VEREDITO: Novo resultado e SUPERIOR ao salvo anteriormente.
+  Atualizando best_params.yaml.
+======================================================================
+```
+
+Se o novo resultado for inferior, o `best_params.yaml` anterior e mantido intacto:
+
+```
+  VEREDITO: Resultado salvo anteriormente e IGUAL ou SUPERIOR.
+  best_params.yaml mantido sem alteracao.
+```
+
+**Cenario 4: Treinamento ignorando o tuning**
+
+```bash
+python main.py --mode train --no_saved_params
+```
+
+A flag `--no_saved_params` faz com que o pipeline ignore o `best_params.yaml` e use exclusivamente os defaults do YAML. O log exibe:
+
+```
+Flag --no_saved_params ativa. Ignorando best_params.yaml e usando defaults do YAML.
+```
+
+Isso permite comparar o desempenho do modelo com e sem otimizacao de hiperparametros.
+
+**Cenario 5: Treinamento com override parcial via CLI**
+
+```bash
+python main.py --mode train --architecture MLP --epochs 30
+```
+
+Se `best_params.yaml` existir (e.g., com architecture=DeepCNN, epochs=20), os argumentos CLI tem prioridade: architecture=MLP (da CLI), epochs=30 (da CLI), mas learning_rate, dropout_rate, weight_decay, scheduler, batch_size e optimizer vem do `best_params.yaml`.
 
 ---
 
-### Origem dos Hiperparametros no Modo `--mode tune`
+### Criterios de Comparacao entre Tunings
 
-O modo `--mode tune` executa duas fases sequenciais **dentro de uma unica execucao do script**:
+A funcao `_is_strictly_better` em `src/persistence.py` usa uma hierarquia de tres criterios para decidir se um novo resultado substitui o anterior:
 
-**Fase 1 — Busca (funcao `run_tuning` em `tuning.py`)**
+1. **Acuracia de validacao** (criterio primario): o resultado com maior `val_accuracy` vence. Diferencas menores que 0.01% (ACCURACY_THRESHOLD=0.0001) sao tratadas como empate para evitar que ruido de ponto flutuante cause trocas desnecessarias.
 
-O Optuna cria um objeto `Study` em memoria e executa N trials. Em cada trial, o Optuna sugere uma combinacao de 8 hiperparametros a partir do espaco de busca definido na secao `search_space` do YAML. O codigo em `tuning.py` (funcao `objective`) chama `trial.suggest_categorical`, `trial.suggest_float`, etc., para obter cada valor. Com esses valores, o trial constroi um modelo, treina por ate N epocas (com early stopping), e retorna a acuracia de validacao ao Optuna.
+2. **Numero de parametros** (desempate - Navalha de Occam): se as acuracias forem equivalentes, o modelo com menos parametros treinaveis e preferido. Modelos mais simples tendem a generalizar melhor (Goodfellow et al., 2016, cap. 5.6).
 
-Cada trial executa o loop de treinamento completo: as mesmas funcoes `train_one_epoch` e `validate` de `training.py` sao chamadas. O treinamento dentro de cada trial usa exatamente a mesma logica do modo `--mode train` — a classe `Trainer`, o forward/backward pass, o early stopping e o scheduler sao identicos. A diferenca e que os hiperparametros nao vem do YAML nem da CLI, mas do Optuna.
-
-**Fase 2 — Treinamento final automatico (em `main.py`, linhas 509-532)**
-
-Apos o termino de todos os trials, o script extrai os hiperparametros do melhor trial e os injeta em memoria nos objetos `args` e `config`. O codigo que faz isso e:
+3. **Tempo de treinamento** (desempate secundario): se acuracia e complexidade forem equivalentes, o modelo mais rapido de treinar e preferido.
 
 ```python
-# main.py, linhas 512-532
-best_params = study.best_trial.params
-
-# Sobrescreve os campos do objeto args (simula como se fossem argumentos CLI)
-args.architecture  = best_params.get('architecture', 'LeNet5')
-args.epochs        = best_params.get('epochs', 20)
-args.learning_rate = best_params.get('learning_rate', 1e-3)
-args.batch_size    = best_params.get('batch_size', 64)
-args.optimizer     = best_params.get('optimizer', 'Adam')
-
-# Sobrescreve a secao defaults do config em memoria (para dropout, weight_decay, scheduler)
-config['defaults'].update({
-    'dropout_rate':  best_params.get('dropout_rate', 0.25),
-    'weight_decay':  best_params.get('weight_decay', 1e-4),
-    'scheduler':     best_params.get('scheduler', 'CosineAnnealingLR'),
-})
-
-# Chama a mesma funcao de treinamento usada pelo --mode train
-run_single_training(args, config, device)
+# src/persistence.py, funcao _is_strictly_better
+if new_acc > old_acc + 0.0001:    return True   # Novo tem acuracia superior
+if old_acc > new_acc + 0.0001:    return False   # Antigo tem acuracia superior
+if new_params < old_params:       return True   # Empate em acc: prefere menos parametros
+if old_params < new_params:       return False
+return new_time < old_time                       # Empate total: prefere mais rapido
 ```
 
-A funcao `run_single_training` e chamada com os objetos `args` e `config` ja modificados. Quando ela executa `args.architecture or defaults['architecture']`, encontra o valor do melhor trial em `args.architecture` e o utiliza. Para `dropout_rate` (que nao tem flag CLI), encontra o valor atualizado em `config['defaults']['dropout_rate']`.
+---
 
-Essa injecao acontece **somente em memoria**. O arquivo `config/hyperparameters.yaml` nao e alterado. Quando o processo Python termina, esses valores sao descartados. Nao ha nenhum mecanismo que persista os melhores hiperparametros para uso futuro pelo modo `--mode train`.
+### Historico Cumulativo de Tunings
+
+Cada execucao de tuning e registrada em `results/tuning_history.yaml`, independente de ter se tornado o novo melhor ou nao. Cada entrada contem todos os hiperparametros, metricas, metadados e um campo `was_saved_as_best` indicando se aquela execucao substituiu o melhor anterior.
+
+Este arquivo permite analise retrospectiva: qual sampler tende a produzir melhores resultados? Quantos trials sao suficientes? Qual arquitetura aparece com mais frequencia entre os melhores?
+
+---
+
+### Conteudo do Arquivo `best_params.yaml`
+
+```yaml
+hyperparameters:
+  architecture: DeepCNN
+  learning_rate: 0.00234
+  batch_size: 128
+  optimizer: AdamW
+  epochs: 30
+  dropout_rate: 0.18
+  weight_decay: 3.2e-05
+  scheduler: CosineAnnealingLR
+
+metrics:
+  val_accuracy: 0.9945
+  num_parameters: 128456
+  training_time_seconds: 142.5
+
+metadata:
+  sampler: tpe
+  n_trials: 50
+  n_completed: 47
+  n_pruned: 3
+  trial_number: 38
+  timestamp: '2026-03-23 14:30:00'
+```
 
 ---
 
@@ -366,35 +498,37 @@ A unica diferenca e a **origem dos hiperparametros**:
 
 | Aspecto | `--mode train` | Trial do tuning | Treinamento final do tuning |
 |---------|---------------|-----------------|---------------------------|
-| Origem dos hiperparametros | YAML defaults + CLI | Optuna `trial.suggest_*` | `study.best_trial.params` injetados em `args`/`config` |
+| Origem dos hiperparametros | best_params.yaml > YAML defaults > CLI | Optuna `trial.suggest_*` | `study.best_trial.params` injetados em `args`/`config` |
 | Funcao de treinamento | `run_single_training` | `Trainer.fit` (dentro de `objective`) | `run_single_training` |
 | Avaliacao no teste | Sim (via `full_evaluation`) | Nao (apenas validacao) | Sim (via `full_evaluation`) |
 | Gera figuras e relatorio | Sim | Nao | Sim |
 | Salva checkpoint | Sim | Nao | Sim |
 
-Nota: os trials individuais do tuning NAO avaliam no conjunto de teste e NAO geram figuras. Apenas a acuracia de validacao e reportada ao Optuna. O treinamento final (Fase 2) e que executa a avaliacao completa com metricas, figuras e checkpoint.
+Os trials individuais do tuning NAO avaliam no conjunto de teste e NAO geram figuras. Apenas a acuracia de validacao e reportada ao Optuna. O treinamento final (Fase 2 do tune) e que executa a avaliacao completa.
 
 ---
 
 ### Nomenclatura dos Artefatos de Saida
 
-Os arquivos de saida seguem o padrao `{nome_da_arquitetura}_*`. O nome e determinado pela variavel `architecture` resolvida durante o treinamento. Exemplos:
+Os arquivos de saida seguem o padrao `{nome_da_arquitetura}_*`. O nome e determinado pela variavel `architecture` resolvida durante o treinamento:
 
 | Cenario | Arquivo gerado |
 |---------|---------------|
 | `--mode train` (default YAML: LeNet5) | `results/checkpoints/LeNet5_best.pt` |
-| `--mode train --architecture DeepCNN` | `results/checkpoints/DeepCNN_best.pt` |
+| `--mode train` (carregou best_params: DeepCNN) | `results/checkpoints/DeepCNN_best.pt` |
+| `--mode train --architecture MLP` | `results/checkpoints/MLP_best.pt` |
 | `--mode tune` (melhor trial: ModernCNN) | `results/checkpoints/ModernCNN_best.pt` |
-| `--mode tune` (melhor trial: DeepCNN) | `results/checkpoints/DeepCNN_best.pt` |
 
-Nao ha distincao de nome entre um modelo treinado via `--mode train` e um modelo treinado pela fase final do `--mode tune`. Se ambos usarem a mesma arquitetura (e.g., DeepCNN), o segundo a ser executado **sobrescreve** o checkpoint do primeiro no diretorio `results/checkpoints/`.
+Nao ha distincao de nome entre um modelo treinado via `--mode train` e o treinamento final do `--mode tune`. Se ambos usarem a mesma arquitetura, o segundo sobrescreve o primeiro.
 
-O mesmo se aplica aos demais artefatos:
+Artefatos completos gerados em `--output_dir`:
 
 ```
 results/
-  {arch}_report.txt                      # Relatorio de metricas
-  tuning_report.txt                      # Gerado apenas pelo modo tune
+  best_params.yaml                       # Melhores hiperparametros (persistente entre execucoes)
+  tuning_history.yaml                    # Historico cumulativo de todos os tunings
+  tuning_report.txt                      # Relatorio detalhado do tuning mais recente
+  {arch}_report.txt                      # Relatorio de metricas do treinamento
   figures/
     {arch}_learning_curves.png           # Curvas de perda e acuracia
     {arch}_confusion_matrix.png          # Matriz de confusao
@@ -402,59 +536,8 @@ results/
   checkpoints/
     {arch}_best.pt                       # Pesos do modelo (state_dict)
   logs/
-    experiment.log                       # Log em modo append (nao sobrescreve)
+    experiment.log                       # Log completo (modo append)
 ```
-
-Para evitar sobrescrita, utilize `--output_dir` com caminhos distintos para cada execucao.
-
----
-
-### Comportamento com Multiplos Tunings
-
-Cada execucao de `--mode tune` e **completamente independente**. O Optuna cria um novo objeto `Study` em memoria a cada chamada, sem consultar resultados de execucoes anteriores. Nao ha banco de dados persistente, cache nem estado compartilhado.
-
-**Cenario: dois tunings consecutivos com samplers diferentes**
-
-```bash
-python main.py --mode tune --sampler tpe    --n_trials 50   # Execucao A
-python main.py --mode tune --sampler random --n_trials 50   # Execucao B
-```
-
-- A execucao A cria seu proprio Study, executa 50 trials, encontra o melhor, treina o modelo final, e salva os artefatos em `results/`.
-- A execucao B faz o mesmo, do zero. Ela nao tem conhecimento dos resultados de A. Se o melhor trial de B encontrar a mesma arquitetura que A, os arquivos em `results/` serao sobrescritos.
-- O unico arquivo que indica qual sampler foi usado e `results/tuning_report.txt`. Se B sobrescrever A, o relatorio de A e perdido.
-
-Para preservar os resultados de ambos:
-
-```bash
-python main.py --mode tune --sampler tpe    --n_trials 50 --output_dir results/tpe
-python main.py --mode tune --sampler random --n_trials 50 --output_dir results/random
-```
-
-Isso gera diretorios independentes. A comparacao entre os resultados de cada sampler e feita manualmente consultando `results/tpe/tuning_report.txt` e `results/random/tuning_report.txt`.
-
-**Cenario: tuning seguido de `--mode train`**
-
-```bash
-python main.py --mode tune --sampler tpe --n_trials 50    # Execucao A: encontra DeepCNN com lr=2.8e-3
-python main.py --mode train                                # Execucao B: usa LeNet5 com lr=1e-3 (YAML)
-```
-
-A execucao B **ignora** completamente o resultado de A. Ela le o YAML original (que nao foi modificado por A), encontra `architecture: "LeNet5"` e `learning_rate: 1.0e-3`, e treina com esses valores. O resultado do tuning so existiu em memoria durante a execucao A.
-
-Para reproduzir manualmente o resultado de um tuning anterior, e necessario ler `tuning_report.txt` e passar os valores via CLI:
-
-```bash
-# Supondo que tuning_report.txt indica: architecture=DeepCNN, lr=0.0028, bs=256, opt=AdamW, epochs=30
-python main.py --mode train \
-  --architecture DeepCNN \
-  --learning_rate 0.0028 \
-  --batch_size 256 \
-  --optimizer AdamW \
-  --epochs 30
-```
-
-Os hiperparametros `dropout_rate`, `weight_decay` e `scheduler` nao possuem flags CLI. Para altera-los, edite manualmente a secao `defaults` em `config/hyperparameters.yaml` antes de executar o comando.
 
 ---
 

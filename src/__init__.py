@@ -14,4 +14,5 @@
 #   training.py       → Loop de treinamento e validação
 #   evaluation.py     → Métricas de desempenho e visualizações
 #   tuning.py         → Otimização de hiperparâmetros com Optuna
+#   persistence.py    → Persistência e comparação de resultados de tuning
 # ============================================================================

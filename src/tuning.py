@@ -202,6 +202,12 @@ def create_objective(
         num_params = count_parameters(model)
         logger.info(f"  Modelo: {architecture} ({num_params:,} parâmetros)")
 
+        # Registra o número de parâmetros como atributo do trial.
+        # Isso permite que o módulo de persistência acesse essa
+        # informação via study.best_trial.user_attrs sem precisar
+        # reconstruir o modelo após o tuning.
+        trial.set_user_attr('num_parameters', num_params)
+
         # =================================================================
         # 4. CONFIGURAÇÃO DO OTIMIZADOR E SCHEDULER
         # =================================================================
